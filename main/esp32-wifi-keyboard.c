@@ -87,13 +87,15 @@ uint8_t char_to_hid_keycode(char c)
         return HID_KEY_0;
     }
 
-    // Handle special characters
+    // Handle special characters and control codes
     switch (c) {
         case ' ': return HID_KEY_SPACE;
         case '\r':
         case '\n': return HID_KEY_ENTER;
-        case '\t': return HID_KEY_TAB;
-        case '\b': return HID_KEY_BACKSPACE;
+        case '\t': return HID_KEY_TAB;   // Tab key (same as 0x09)
+        case '\b':
+        case 0x7F: return HID_KEY_BACKSPACE;  // Backspace and Delete
+        case 0x1B: return 0;  // ESC - let escape sequence handler deal with this
         case '!': return HID_KEY_1;
         case '@': return HID_KEY_2;
         case '#': return HID_KEY_3;
@@ -115,6 +117,8 @@ uint8_t char_to_hid_keycode(char c)
         case ',': return HID_KEY_COMMA;
         case '.': return HID_KEY_PERIOD;
         case '/': return HID_KEY_SLASH;
+        // Additional control character that might be sent specifically for Tab
+        // The Tab key is already handled above with '\t' and 0x09
         default: return 0; // Unknown character
     }
 }

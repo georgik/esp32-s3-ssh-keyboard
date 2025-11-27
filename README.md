@@ -31,6 +31,7 @@ An ESP32-S3 implementation that converts UART input into USB HID keyboard output
 - **Numbers**: 0-9
 - **Punctuation**: !@#$%^&*()_-+=[]{}|;:'",.<>/?`
 - **Special**: Space, Enter, Tab, Backspace
+- **Control Characters**: Full support for terminal control codes (0x09 for Tab, etc.)
 
 ### Navigation Keys
 - **Arrow Keys**: ↑ ↓ ← → (Up, Down, Left, Right)
@@ -100,6 +101,8 @@ idf.py monitor
 hello world          # Appears as: hello world
 HELLO WORLD          # Appears as: HELLO WORLD (with shift)
 123!@#$              # Appears as: 123!@#$
+# Use Tab for indentation and navigation
+[Tab]                # Inserts tab character (logs as "09")
 # Use arrow keys to navigate in text editors
 [Arrow Up]           # Moves cursor up
 [Arrow Down]         # Moves cursor down
