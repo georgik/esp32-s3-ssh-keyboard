@@ -15,3 +15,7 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_tinyusb: ^2.0.1
+  espressif/cjson: ^1.7.19
+  espressif/qrcode: ^0.1.0~2
+  espressif/network_provisioning: ^1.2.0
+  david-cermak/libssh: 0.11.0~1
