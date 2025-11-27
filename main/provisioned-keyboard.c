@@ -606,10 +606,23 @@ static void handle_ssh_session(ssh_session session) {
                 ESP_LOGI(TAG, "SSH shell session started");
                 ssh_message_free(msg);
                 break;
+            } else if (ssh_message_subtype(msg) == SSH_CHANNEL_REQUEST_PTY) {
+                // Accept PTY request for better terminal handling
+                ssh_message_channel_request_reply_success(msg);
+                ESP_LOGI(TAG, "SSH PTY request accepted");
+                ssh_message_free(msg);
+                continue;
             }
         }
         ssh_message_reply_default(msg);
         ssh_message_free(msg);
+    }
+
+    // Configure terminal for immediate character processing
+    if (channel) {
+        const char *terminal_config = "stty -icanon -echo; clear\n";
+        ssh_channel_write(channel, terminal_config, strlen(terminal_config));
+        ESP_LOGI(TAG, "Configured terminal for immediate character input");
     }
 
     // Start keyboard input handler task
