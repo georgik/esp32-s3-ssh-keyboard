@@ -1,0 +1,23 @@
+# ESP32-S3 SSH Keyboard Partitions (8MB Flash)
+# Name,   Type, SubType, Offset,  Size, Flags
+
+# NVS partition for WiFi credentials and general settings
+nvs,      data, nvs,           0x9000,  0x6000,
+
+# Custom NVS partition for SSH keys and authentication data (minimum 0x3000 for read/write)
+ssh_keys, data, nvs,           0xF000,  0x3000,
+
+# PHY init data
+phy_init, data, phy,           0x12000, 0x1000,
+
+# SPIFFS partition for SSH host key file and other storage
+spiffs,   data, spiffs,        0x13000, 0x3D000,
+
+# OTA partition (reduced size)
+ota_0,    app,  ota_0,         0x50000, 0x160000,
+
+# OTA data partition
+otadata,  data, ota,           0x1B0000, 0x2000,
+
+# Factory application partition (aligned to 0x10000 boundary)
+factory,  app,  factory,       0x1C0000, 0x180000
