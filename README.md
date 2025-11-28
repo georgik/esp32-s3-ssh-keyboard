@@ -195,25 +195,12 @@ The SSH server implementation demonstrates advanced ESP-IDF component porting te
 - **Event Groups**: Synchronization for WiFi connection status
 - **Memory Management**: Efficient buffer allocation and cleanup
 
-### Firmware Architecture Comparison
-
-| Component | Basic | WiFi Prov | SSH Server | SSH Simple |
-|-----------|--------|-----------|------------|------------|
-| USB HID   | ✓      | ✓         | ✓          | ✓          |
-| UART Input| ✓      | ✓         | ✓          | ✓          |
-| WiFi      | ✗      | ✓         | ✓          | ✓          |
-| SSH Server| ✗      | ✗         | ✓          | Simulated  |
-| Provisioning| ✗    | ✓         | ✗          | ✗          |
-| Multi-client| ✗     | ✗         | ✓          | ✗          |
 
 ### Project Structure
 ```
 esp32-s3-ssh-keyboard/
 ├── main/
-│   ├── esp32-wifi-keyboard.c      # Main UART-based version
-│   ├── wifi-prov-keyboard.c       # WiFi provisioning version
-│   ├── ssh-keyboard.c            # Full SSH server version
-│   ├── ssh-keyboard-simple.c     # Simplified SSH demo
+│   ├── provisioned-keyboard.c    # Main code
 │   ├── CMakeLists.txt            # Build configuration
 │   └── idf_component.yml         # Component dependencies
 ├── CMakeLists.txt                # Project configuration
@@ -249,6 +236,25 @@ dependencies:
   espressif/network_provisioning: ^1.2.0  # WiFi provisioning
   david-cermak/libssh: 0.11.0~1   # SSH server library
 ```
+
+#### Partition Table (partitions.csv)
+The project uses a custom partition table optimized for ESP32-S3 with multiple storage needs:
+
+| Partition | Type | Size | Purpose |
+|-----------|------|------|---------|
+| **nvs** | data | 24KB | WiFi credentials and general settings |
+| **ssh_keys** | data | 12KB | SSH host keys and authentication data |
+| **phy_init** | data | 4KB | PHY initialization data |
+| **spiffs** | data | 248KB | SSH host key files and additional storage |
+| **ota_0** | app | 1.4MB | OTA firmware updates |
+| **otadata** | data | 8KB | OTA update metadata |
+| **factory** | app | 1.4MB | Main application firmware |
+
+**Key Features:**
+- **Dual NVS Partitions**: Separate partitions for WiFi credentials and SSH keys for security
+- **SPIFFS Storage**: File system for SSH host keys and future expansion
+- **OTA Support**: Full OTA update capability for firmware maintenance
+- **8MB Flash Optimized**: Efficient use of ESP32-S3 flash memory
 
 ## Development and Debugging
 
@@ -452,7 +458,6 @@ idf.py reconfigure
 ## License and Credits
 
 ### License
-This project is provided as-is for educational and development purposes.
 
 ### Technology Credits
 - **ESP-IDF Framework**: Espressif Systems development framework
@@ -472,3 +477,4 @@ This article covers the methodology for integrating third-party libraries like l
 
 ### Project Inspiration
 This project builds upon ESP-IDF TinyUSB examples and extends them with comprehensive remote control capabilities, WiFi provisioning, and SSH server integration for advanced use cases.
+

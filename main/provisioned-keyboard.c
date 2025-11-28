@@ -233,6 +233,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
+// Global variables for provisioning retry logic
+static int provisioning_retry_count = 0;
+static const int MAX_PROVISIONING_RETRIES = 3;
+
 // Provisioning event handler
 static void prov_event_handler(void* arg, esp_event_base_t event_base,
                               int32_t event_id, void* event_data)
@@ -244,12 +248,31 @@ static void prov_event_handler(void* arg, esp_event_base_t event_base,
                 break;
             case NETWORK_PROV_WIFI_CRED_RECV:
                 ESP_LOGI(TAG, "Received Wi-Fi credentials");
+                provisioning_retry_count = 0; // Reset retry count on new credentials
                 break;
-            case NETWORK_PROV_WIFI_CRED_FAIL:
+            case NETWORK_PROV_WIFI_CRED_FAIL: {
                 ESP_LOGE(TAG, "Provisioning failed");
+
+                // Get the disconnect reason for detailed error reporting
+                network_prov_wifi_sta_fail_reason_t *reason = (network_prov_wifi_sta_fail_reason_t *)event_data;
+                if (reason != NULL) {
+                    switch (*reason) {
+                        case NETWORK_PROV_WIFI_STA_AUTH_ERROR:
+                            ESP_LOGE(TAG, "Authentication failed - Wrong password or security settings");
+                            break;
+                        case NETWORK_PROV_WIFI_STA_AP_NOT_FOUND:
+                            ESP_LOGE(TAG, "Access point not found - SSID not available");
+                            break;
+                        default:
+                            ESP_LOGE(TAG, "Connection failed - Unknown reason: %d", *reason);
+                            break;
+                    }
+                }
                 break;
+            }
             case NETWORK_PROV_WIFI_CRED_SUCCESS:
                 ESP_LOGI(TAG, "Provisioning successful");
+                provisioning_retry_count = 0; // Reset on success
                 break;
             case NETWORK_PROV_END:
                 ESP_LOGI(TAG, "Provisioning ended");
@@ -279,20 +302,71 @@ const network_prov_event_handler_t wifi_prov_event_handler = {
     .user_data = NULL
 };
 
-// WiFi provisioning function (based on official example)
-static void wifi_provisioning(void)
+// Check if WiFi credentials are already stored in NVS
+static bool wifi_credentials_available(void)
 {
-    ESP_LOGI(TAG, "Starting WiFi provisioning...");
+    wifi_config_t wifi_config;
+    esp_err_t ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
 
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    if (ret == ESP_OK && strlen((char*)wifi_config.sta.ssid) > 0) {
+        ESP_LOGI(TAG, "Found stored WiFi credentials for SSID: %s", wifi_config.sta.ssid);
+        return true;
     }
-    ESP_ERROR_CHECK(ret);
 
-    // Initialize TCP/IP and event loop
+    ESP_LOGI(TAG, "No stored WiFi credentials found");
+    return false;
+}
+
+// Initialize WiFi and attempt connection with stored credentials
+static esp_err_t wifi_connect_with_stored_credentials(void)
+{
+    ESP_LOGI(TAG, "Connecting to stored WiFi credentials...");
+
+    // Get netif handle
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL) {
+        ESP_LOGE(TAG, "WiFi netif not available");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Start WiFi
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Wait for WiFi connection
+    ESP_LOGI(TAG, "Connecting to stored WiFi network...");
+    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE,
+                                           pdFALSE,
+                                           10000 / portTICK_PERIOD_MS); // 10 second timeout
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Successfully connected to stored WiFi network!");
+
+        // Get and display IP address
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            ESP_LOGI(TAG, "Device IP: " IPSTR, IP2STR(&ip_info.ip));
+            ESP_LOGI(TAG, "SSH available at: ssh esp32@" IPSTR, IP2STR(&ip_info.ip));
+        }
+
+        return ESP_OK;
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGW(TAG, "Failed to connect to stored WiFi network");
+        return ESP_FAIL;
+    } else {
+        ESP_LOGW(TAG, "WiFi connection timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+}
+
+// Initialize WiFi and provisioning infrastructure (called once)
+static esp_err_t init_wifi_infrastructure(void)
+{
+    ESP_LOGI(TAG, "Initializing WiFi and provisioning infrastructure...");
+
+    // Initialize TCP/IP and event loop (only once)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_event_group = xEventGroupCreate();
@@ -302,17 +376,42 @@ static void wifi_provisioning(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Register event handlers
-    ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
+    // Register event handlers (only once)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    return ESP_OK;
+}
+
+// Start WiFi provisioning session (can be called multiple times for retries)
+static esp_err_t start_provisioning_session(void)
+{
+    ESP_LOGI(TAG, "Starting WiFi provisioning (attempt %d/%d)...",
+             provisioning_retry_count + 1, MAX_PROVISIONING_RETRIES);
 
     // Configure provisioning
     const char *service_name = "PROV_ESP32";
     const char *pop = "abcd1234"; // Proof of possession
 
-    // Print QR code
+    ESP_LOGI(TAG, "Scan this QR code with the ESP Provisioning app:");
     wifi_prov_print_qr(service_name, NULL, pop, "ble");
+
+    // Type QR code via USB keyboard for user convenience
+    ESP_LOGI(TAG, "Typing QR code via USB keyboard...");
+
+    // Type a header message
+    char header[] = "Scan this QR code with ESP Provisioning app:\n";
+    for (int i = 0; header[i] != '\0'; i++) {
+        send_key(header[i]);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    // Type the provisioning info as text backup
+    char info_msg[] = "\nConnection Details:\nSSID: PROV_ESP32\nPassword: abcd1234\n";
+    for (int i = 0; info_msg[i] != '\0'; i++) {
+        send_key(info_msg[i]);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 
     // Configure provisioning manager
     network_prov_mgr_config_t config = {
@@ -322,32 +421,130 @@ static void wifi_provisioning(void)
 
     ESP_ERROR_CHECK(network_prov_mgr_init(config));
 
+    // Register provisioning event handler
+    ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
+
     // Start provisioning
     ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1, pop, service_name, NULL));
 
-    // Wait for WiFi connection
+    // Wait for WiFi connection with reasonable timeout
     ESP_LOGI(TAG, "Waiting for WiFi connection...");
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE,
                                            pdFALSE,
-                                           portMAX_DELAY);
+                                           portMAX_DELAY); // Wait until provisioned
+
+    // Cleanup provisioning manager before returning
+    ESP_LOGI(TAG, "Cleaning up provisioning manager...");
+    network_prov_mgr_deinit();
+
+    // Unregister provisioning event handler
+    esp_event_handler_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler);
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to WiFi successfully!");
 
-        // Type success message via USB keyboard
-        char success_msg[] = "WiFi Provisioning Successful!\n";
-        for (int i = 0; success_msg[i] != '\0'; i++) {
-            send_key(success_msg[i]);
+        // Get and display IP address
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip_info;
+        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+            ESP_LOGI(TAG, "Device IP: " IPSTR, IP2STR(&ip_info.ip));
+            ESP_LOGI(TAG, "SSH available at: ssh esp32@" IPSTR, IP2STR(&ip_info.ip));
+            ESP_LOGI(TAG, "Password: keyboard");
+        }
+
+        // Type minimal connection status - just indicate ready state
+        char ready_msg[] = "WiFi Ready - SSH Available\n";
+        for (int i = 0; ready_msg[i] != '\0'; i++) {
+            send_key(ready_msg[i]);
             vTaskDelay(pdMS_TO_TICKS(80));
         }
+
+        return ESP_OK;
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Failed to connect to WiFi");
+        ESP_LOGE(TAG, "Provisioning attempt %d failed", provisioning_retry_count + 1);
+        provisioning_retry_count++;
+        return ESP_FAIL;
     }
 
-    // Cleanup
-    network_prov_mgr_deinit();
+    return ESP_ERR_TIMEOUT;
+}
+
+// WiFi provisioning function with retry logic
+static void wifi_provisioning(void)
+{
+    ESP_LOGI(TAG, "Starting WiFi connection process...");
+
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialize WiFi infrastructure (only once)
+    ret = init_wifi_infrastructure();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize WiFi infrastructure");
+        return;
+    }
+
+    // Check if we have stored WiFi credentials
+    if (wifi_credentials_available()) {
+        // Try to connect with stored credentials first
+        ret = wifi_connect_with_stored_credentials();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Connected using stored credentials - SSH server ready");
+            // No USB typing needed when already provisioned - just start SSH server
+            return;
+        } else {
+            ESP_LOGI(TAG, "Stored credentials failed, starting provisioning...");
+            // Invalidate stored credentials by clearing WiFi config
+            ESP_ERROR_CHECK(esp_wifi_restore());
+            provisioning_retry_count = 0;
+        }
+    }
+
+    ESP_LOGI(TAG, "Starting WiFi provisioning with retry logic...");
+
+    // Retry provisioning with exponential backoff
+    do {
+        ret = start_provisioning_session();
+
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi provisioning completed successfully");
+            provisioning_retry_count = 0;
+            return;
+        }
+
+        if (provisioning_retry_count < MAX_PROVISIONING_RETRIES) {
+            ESP_LOGW(TAG, "Retrying provisioning in %d seconds...",
+                     provisioning_retry_count * 5);
+
+            // Wait before retry with exponential backoff
+            vTaskDelay(pdMS_TO_TICKS(provisioning_retry_count * 5000));
+
+            // Type retry message via USB keyboard
+            char retry_msg[] = "WiFi provisioning failed. Retrying...\n";
+            for (int i = 0; retry_msg[i] != '\0'; i++) {
+                send_key(retry_msg[i]);
+                vTaskDelay(pdMS_TO_TICKS(80));
+            }
+        }
+    } while (provisioning_retry_count < MAX_PROVISIONING_RETRIES);
+
+    // If all retries failed
+    ESP_LOGE(TAG, "WiFi provisioning failed after %d attempts", MAX_PROVISIONING_RETRIES);
+    provisioning_retry_count = 0;
+
+    // Type failure message via USB keyboard
+    char fail_msg[] = "WiFi provisioning failed. Please reset device to retry.\n";
+    for (int i = 0; fail_msg[i] != '\0'; i++) {
+        send_key(fail_msg[i]);
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
 }
 
 // Provisioning completion demo task (disabled to avoid automatic typing)
@@ -486,6 +683,11 @@ static ssh_key load_ssh_host_key(void) {
     return key;
 }
 
+// Note: Using deprecated ssh_message_auth_password function for SSH authentication
+// This is a known limitation with libssh 0.11. The callback-based approach
+// had compatibility issues with channel opening, so we're using the message API
+// which requires the deprecated function for password access.
+
 
 // SSH Keyboard input handler
 static void ssh_keyboard_task(void *arg) {
@@ -521,7 +723,7 @@ static void ssh_keyboard_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-// SSH Session handler - simplified message-based approach
+// SSH Session handler - simple message-based approach for compatibility
 static void handle_ssh_session(ssh_session session) {
     ssh_message msg = NULL;
     ssh_channel channel = NULL;
@@ -545,7 +747,10 @@ static void handle_ssh_session(ssh_session session) {
         if (ssh_message_type(msg) == SSH_REQUEST_AUTH) {
             if (ssh_message_subtype(msg) == SSH_AUTH_METHOD_PASSWORD) {
                 const char *user = ssh_message_auth_user(msg);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
                 const char *password = ssh_message_auth_password(msg);
+#pragma GCC diagnostic pop
 
                 ESP_LOGI(TAG, "SSH password auth for user: %s", user);
 
@@ -559,6 +764,11 @@ static void handle_ssh_session(ssh_session session) {
                     ESP_LOGW(TAG, "SSH authentication failed");
                     ssh_message_reply_default(msg);
                 }
+            } else if (ssh_message_subtype(msg) == SSH_AUTH_METHOD_NONE) {
+                const char *user = ssh_message_auth_user(msg);
+                ESP_LOGI(TAG, "SSH auth none request for user: %s", user);
+                ssh_message_auth_set_methods(msg, SSH_AUTH_METHOD_PASSWORD);
+                ssh_message_reply_default(msg);
             } else {
                 ESP_LOGW(TAG, "Unsupported auth method: %d", ssh_message_subtype(msg));
                 ssh_message_reply_default(msg);
